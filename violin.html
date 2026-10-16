@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>VioShred — 2-String Violin</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;background:#0b0d14;color:#e8ecf5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+    overflow:hidden;user-select:none;-webkit-user-select:none;overscroll-behavior:none;}
+  #app{display:flex;flex-direction:column;height:100vh;height:100dvh;}
+  header{padding:8px 10px 9px;display:flex;flex-wrap:wrap;gap:7px 9px;align-items:center;
+    background:linear-gradient(180deg,#151b2d,#0d1220);border-bottom:1px solid rgba(255,255,255,.08);}
+  .brand{font-weight:800;font-size:15px;letter-spacing:.4px;
+    background:linear-gradient(90deg,#ffcf6b,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .readout{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#9fb2d6;
+    margin-left:auto;white-space:nowrap;}
+  .readout b{color:#e8ecf5;}
+  .ctl{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+  select,button{font:600 12px/1 inherit;color:#dbe6fb;background:#1b2338;
+    border:1px solid rgba(255,255,255,.13);border-radius:9px;padding:7px 10px;outline:none;}
+  button.on{background:linear-gradient(180deg,#2a6b74,#1c4a54);border-color:#3fb6c6;color:#dffbff;
+    box-shadow:0 0 10px rgba(63,182,198,.45);}
+  input[type=range]{width:96px;accent-color:#67e8f9;}
+  #board{flex:1 1 auto;min-height:0;width:100%;display:block;touch-action:none;}
+  #overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;background:radial-gradient(120% 90% at 50% 30%,#182238,#070a12);z-index:9;text-align:center;padding:24px;}
+  #overlay h1{margin:0;font-size:26px;font-weight:800;
+    background:linear-gradient(90deg,#ffcf6b,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent;}
+  #overlay p{margin:0;color:#93a4c6;font-size:13px;max-width:340px;line-height:1.5;}
+  #startBtn{margin-top:6px;font-size:16px;font-weight:800;padding:14px 30px;border-radius:999px;color:#04121a;
+    background:linear-gradient(90deg,#ffcf6b,#67e8f9);border:none;box-shadow:0 8px 26px rgba(103,232,249,.35);}
+  .hide{display:none!important;}
+  .hint{color:#5f7099;font-size:11px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">VioShred</div>
+    <div class="ctl">
+      <select id="tuning" title="Tuning"></select>
+      <button id="glideBtn" class="on">Glide</button>
+      <button id="vibBtn" class="on">Vibrato</button>
+      <button id="revBtn" class="on">Reverb</button>
+      <input id="vol" type="range" min="0" max="100" value="85" title="Volume">
+    </div>
+    <div class="readout" id="readout">—</div>
+  </header>
+  <canvas id="board"></canvas>
+</div>
+
+<div id="overlay">
+  <h1>VioShred</h1>
+  <p>Two strings · seven frets · bowed-string synth in the spirit of GeoShred.<br>
+     Touch a glowing string and slide along it to play.</p>
+  <button id="startBtn">TAP TO PLAY</button>
+  <p class="hint">Sound needs one tap to unlock in the browser.</p>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------------- audio ---------------- */
+var AC = window.AudioContext || window.webkitAudioContext;
+var ctx=null, masterGain=null, wetGain=null, conv=null, audioReady=false;
+var reverbOn=true, vibOn=true, glide=true, volume=0.85;
+
+function makeImpulse(seconds, decay){
+  var rate=ctx.sampleRate, len=Math.floor(rate*seconds);
+  var buf=ctx.createBuffer(2,len,rate);
+  for(var c=0;c<2;c++){
+    var d=buf.getChannelData(c);
+    for(var i=0;i<len;i++){ d[i]=(Math.random()*2-1)*Math.pow(1-i/len,decay); }
+  }
+  return buf;
+}
+
+function initAudio(){
+  if(audioReady) return;
+  ctx=new AC();
+  masterGain=ctx.createGain(); masterGain.gain.value=volume;
+  conv=ctx.createConvolver(); conv.buffer=makeImpulse(2.4,2.6);
+  wetGain=ctx.createGain(); wetGain.gain.value=reverbOn?0.28:0.0;
+  var dry=ctx.createGain(); dry.gain.value=0.92;
+  masterGain.connect(dry); dry.connect(ctx.destination);
+  masterGain.connect(conv); conv.connect(wetGain); wetGain.connect(ctx.destination);
+  audioReady=true;
+}
+
+function makeVoice(base){
+  var t0=ctx.currentTime;
+  var o1=ctx.createOscillator(); o1.type='sawtooth';
+  var o2=ctx.createOscillator(); o2.type='sawtooth';
+  var o3=ctx.createOscillator(); o3.type='triangle';
+  var env=ctx.createGain(); env.gain.value=0.0001;
+  var expr=ctx.createGain(); expr.gain.value=0.6;
+  var filt=ctx.createBiquadFilter(); filt.type='lowpass'; filt.frequency.value=1800; filt.Q.value=3.5;
+  var form=ctx.createBiquadFilter(); form.type='peaking'; form.frequency.value=820; form.Q.value=1.1; form.gain.value=7;
+  var lfo=ctx.createOscillator(); lfo.type='sine'; lfo.frequency.value=5.4;
+  var lfoAmt=ctx.createGain(); lfoAmt.gain.value = vibOn?7:0;
+
+  lfo.connect(lfoAmt);
+  lfoAmt.connect(o1.detune); lfoAmt.connect(o2.detune); lfoAmt.connect(o3.detune);
+  o1.connect(filt); o2.connect(filt); o3.connect(filt);
+  filt.connect(form); form.connect(env); env.connect(expr); expr.connect(masterGain);
+
+  o1.detune.value=-7; o2.detune.value=7;
+  o1.frequency.value=base; o2.frequency.value=base; o3.frequency.value=base*0.5;
+  o1.start(t0); o2.start(t0); o3.start(t0); lfo.start(t0);
+  env.gain.setValueAtTime(0.0001,t0);
+  env.gain.exponentialRampToValueAtTime(0.9,t0+0.12);
+
+  return {
+    released:false,
+    setFreq:function(f,glideTime){
+      var t=ctx.currentTime, tc=glideTime||0.04;
+      o1.frequency.setTargetAtTime(f,t,tc);
+      o2.frequency.setTargetAtTime(f,t,tc);
+      o3.frequency.setTargetAtTime(f*0.5,t,tc);
+      filt.frequency.setTargetAtTime(Math.max(700,Math.min(6000,f*5.5)),t,tc);
+    },
+    setPressure:function(p){
+      expr.gain.setTargetAtTime(0.22+0.78*p,ctx.currentTime,0.05);
+    },
+    setVibrato:function(on){ lfoAmt.gain.setTargetAtTime(on?7:0,ctx.currentTime,0.05); },
+    release:function(){
+      if(this.released) return; this.released=true;
+      var t=ctx.currentTime;
+      env.gain.cancelScheduledValues(t);
+      env.gain.setTargetAtTime(0.0001,t,0.06);
+      var stop=t+0.7;
+      try{ o1.stop(stop); o2.stop(stop); o3.stop(stop); lfo.stop(stop); }catch(e){}
+    }
+  };
+}
+
+/* ---------------- instrument config ---------------- */
+var TUNINGS={
+  "Violin G3·D4":[196.00,293.66],
+  "Fifth D4·A4":[293.66,440.00],
+  "Viola C3·G3":[130.81,196.00],
+  "Cello C2·G2":[65.41,98.00],
+  "Low G2·D3":[98.00,146.83]
+};
+var tuning="Violin G3·D4";
+var STRING_COLORS=["#ffcf6b","#67e8f9"];
+var NAMES=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+function noteName(f){
+  var midi=Math.round(69+12*Math.log2(f/440));
+  var n=NAMES[((midi%12)+12)%12];
+  var oct=Math.floor(midi/12)-1;
+  return n+oct;
+}
+
+/* ---------------- geometry ---------------- */
+var canvas=document.getElementById("board");
+var g=canvas.getContext("2d");
+var W=0,H=0,DPR=1;
+var geo={nutX:64,right:0,fretW:0,laneH:0,lanes:[0,0],strings:[0,0]};
+var active=new Map();      /* pointerId -> state */
+var stringNow=[null,null]; /* latest freq per string */
+
+function layout(){
+  var r=canvas.getBoundingClientRect();
+  DPR=Math.min(window.devicePixelRatio||1,2.5);
+  W=r.width; H=r.height;
+  canvas.width=Math.max(1,Math.round(W*DPR));
+  canvas.height=Math.max(1,Math.round(H*DPR));
+  g.setTransform(DPR,0,0,DPR,0,0);
+  var top=10,bot=10;
+  geo.laneH=(H-top-bot)/2;
+  geo.lanes[0]=top;
+  geo.lanes[1]=top+geo.laneH;
+  geo.strings[0]=top+geo.laneH*0.5;
+  geo.strings[1]=top+geo.laneH*1.5;
+  geo.nutX=Math.max(48,W*0.12);
+  geo.right=W-16;
+  geo.fretW=(geo.right-geo.nutX)/7;
+}
+
+/* ---------------- mapping ---------------- */
+function freqForX(s,x){
+  var base=TUNINGS[tuning][s];
+  var n=(x-geo.nutX)/geo.fretW;
+  n=Math.max(0,Math.min(7,n));
+  if(!glide) n=Math.round(n);
+  return base*Math.pow(2,n/12);
+}
+function pressureForY(s,y){
+  var rel=(y-geo.lanes[s])/geo.laneH;
+  return Math.max(0.15,Math.min(1,rel));
+}
+
+/* ---------------- drawing ---------------- */
+function draw(){
+  g.clearRect(0,0,W,H);
+  var bg=g.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,"#0e1220"); bg.addColorStop(1,"#070810");
+  g.fillStyle=bg; g.fillRect(0,0,W,H);
+
+  /* fret cells */
+  for(var k=1;k<=7;k++){
+    var cx=geo.nutX+k*geo.fretW, x0=cx-geo.fretW/2, x1=cx+geo.fretW/2;
+    g.fillStyle=(k%2?"rgba(255,255,255,0.022)":"rgba(255,255,255,0.05)");
+    g.fillRect(x0,0,x1-x0,H);
+  }
+  /* open-string zone tint */
+  g.fillStyle="rgba(255,255,255,0.03)";
+  g.fillRect(0,0,geo.nutX,H);
+
+  /* fret wires */
+  for(k=1;k<=7;k++){
+    var wx=geo.nutX+k*geo.fretW;
+    g.strokeStyle="rgba(180,200,255,0.16)"; g.lineWidth=2;
+    g.beginPath(); g.moveTo(wx,8); g.lineTo(wx,H-8); g.stroke();
+  }
+  /* nut */
+  g.strokeStyle="rgba(230,240,255,0.5)"; g.lineWidth=6;
+  g.beginPath(); g.moveTo(geo.nutX,6); g.lineTo(geo.nutX,H-6); g.stroke();
+
+  /* labels */
+  g.textAlign="center";
+  g.fillStyle="rgba(200,215,255,0.35)"; g.font="600 12px system-ui";
+  for(k=1;k<=7;k++){ g.fillText(k, geo.nutX+k*geo.fretW, H-6); }
+  g.fillText("open", geo.nutX/2, H-6);
+
+  /* strings */
+  for(var s=0;s<2;s++){
+    var y=geo.strings[s];
+    g.save();
+    g.shadowColor=STRING_COLORS[s]; g.shadowBlur=14;
+    g.strokeStyle=STRING_COLORS[s]; g.lineWidth=3.2;
+    g.beginPath(); g.moveTo(6,y); g.lineTo(W-6,y); g.stroke();
+    g.restore();
+    g.textAlign="left"; g.fillStyle=STRING_COLORS[s]; g.font="700 12px system-ui";
+    g.fillText(s===0?"String 1":"String 2", 10, geo.lanes[s]+16);
+  }
+
+  /* finger dots */
+  active.forEach(function(st){
+    var y=geo.strings[st.s];
+    var rad=12+st.p*8;
+    g.save();
+    g.shadowColor=STRING_COLORS[st.s]; g.shadowBlur=20;
+    g.fillStyle=STRING_COLORS[st.s];
+    g.globalAlpha=0.85;
+    g.beginPath(); g.arc(st.x,y,rad,0,Math.PI*2); g.fill();
+    g.globalAlpha=1; g.shadowBlur=0;
+    g.fillStyle="#0b0d14";
+    g.font="700 11px system-ui"; g.textAlign="center"; g.textBaseline="middle";
+    g.fillText(st.name, st.x, y);
+    g.textBaseline="alphabetic";
+    g.restore();
+  });
+
+  requestAnimationFrame(draw);
+}
+
+/* ---------------- interaction ---------------- */
+function toLocal(e){
+  var r=canvas.getBoundingClientRect();
+  return {x:e.clientX-r.left, y:e.clientY-r.top};
+}
+function updateReadout(){
+  var a=stringNow[0]?noteName(stringNow[0]):"—";
+  var b=stringNow[1]?noteName(stringNow[1]):"—";
+  document.getElementById("readout").innerHTML="S1 <b>"+a+"</b> &nbsp; S2 <b>"+b+"</b>";
+}
+
+canvas.addEventListener("pointerdown",function(e){
+  if(!audioReady) return;
+  e.preventDefault();
+  try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
+  var p=toLocal(e);
+  var s=(p.y<geo.lanes[1])?0:1;
+  var f=freqForX(s,p.x);
+  var pr=pressureForY(s,p.y);
+  var v=makeVoice(f);
+  v.setPressure(pr);
+  stringNow[s]=f;
+  active.set(e.pointerId,{s:s,x:p.x,p:pr,voice:v,name:noteName(f)});
+  if(navigator.vibrate) navigator.vibrate(8);
+  updateReadout();
+},{passive:false});
+
+canvas.addEventListener("pointermove",function(e){
+  var st=active.get(e.pointerId); if(!st) return;
+  e.preventDefault();
+  var p=toLocal(e);
+  st.x=p.x;
+  st.p=pressureForY(st.s,p.y);
+  var f=freqForX(st.s,p.x);
+  st.voice.setFreq(f, glide?0.06:0.02);
+  st.voice.setPressure(st.p);
+  st.name=noteName(f);
+  stringNow[st.s]=f;
+  updateReadout();
+},{passive:false});
+
+function endPointer(e){
+  var st=active.get(e.pointerId); if(!st) return;
+  st.voice.release();
+  active.delete(e.pointerId);
+  stringNow[st.s]=null;
+  updateReadout();
+}
+canvas.addEventListener("pointerup",endPointer);
+canvas.addEventListener("pointercancel",endPointer);
+canvas.addEventListener("pointerleave",function(e){
+  if(active.has(e.pointerId)) endPointer(e);
+});
+
+/* ---------------- controls ---------------- */
+var sel=document.getElementById("tuning");
+Object.keys(TUNINGS).forEach(function(k){
+  var o=document.createElement("option"); o.value=k; o.textContent=k; sel.appendChild(o);
+});
+sel.value=tuning;
+sel.addEventListener("change",function(){ tuning=sel.value; });
+
+function toggle(btn,get,set){
+  btn.addEventListener("click",function(){
+    set(!get());
+    btn.classList.toggle("on",get());
+  });
+}
+toggle(document.getElementById("glideBtn"),function(){return glide;},function(v){glide=v;});
+toggle(document.getElementById("vibBtn"),function(){return vibOn;},function(v){
+  vibOn=v;
+  active.forEach(function(st){ st.voice.setVibrato(v); });
+});
+toggle(document.getElementById("revBtn"),function(){return reverbOn;},function(v){
+  reverbOn=v;
+  if(wetGain) wetGain.gain.setTargetAtTime(v?0.28:0,ctx.currentTime,0.05);
+});
+document.getElementById("vol").addEventListener("input",function(e){
+  volume=e.target.value/100;
+  if(masterGain) masterGain.gain.setTargetAtTime(volume,ctx.currentTime,0.02);
+});
+
+/* ---------------- boot ---------------- */
+document.getElementById("startBtn").addEventListener("click",function(){
+  initAudio();
+  if(ctx.state==="suspended") ctx.resume();
+  document.getElementById("overlay").classList.add("hide");
+  layout();
+});
+
+window.addEventListener("resize",layout);
+window.addEventListener("orientationchange",function(){ setTimeout(layout,150); });
+layout();
+requestAnimationFrame(draw);
+updateReadout();
+})();
+</script>
+</body>
+</html>
